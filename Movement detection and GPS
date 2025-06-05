@@ -1,0 +1,192 @@
+#include <ESP8266WiFi.h> 
+#include <ESP8266HTTPClient.h> 
+#include <Adafruit_Fingerprint.h> 
+#include <SoftwareSerial.h> 
+#include <base64.h> // Include Base64 library 
+#include <TinyGPS++.h> // Include TinyGPS++ library 
+#include <Wire.h> // Include Wire library for I2C 
+communication 
+#include <Adafruit_Sensor.h> 
+#include <Adafruit_ADXL345_U.h> // Include Adafruit 
+ADXL345 library 
+// Wi-Fi credentials 
+const char* ssid = "123456789";
+const char* password = "123456789"; 
+// Twilio credentials 
+const char*account_sid="A"; 
+const char* auth_token = ""; 
+const char* from_number = "+"; 
+const char* to_number = ""; 
+// Define SoftwareSerial pins for Fingerprint 
+SoftwareSerial mySerial(D7, D8); // RX, TX for fingerprint sensor 
+// Define SoftwareSerial pins for GPS 
+SoftwareSerial gpsSerial(D1, D2); // RX, TX for GPS 
+TinyGPSPlus gps; // Create a TinyGPSPlus object 
+// Fingerprint sensor initialization 
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial); 
+// ADXL345 accelerometer initialization 
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345); // 
+Unique ID for the sensor, doesn't matter for I2C 
+// Last known GPS coordinates 
+float lastLatitude = 0.0; 
+float lastLongitude = 0.0; 
+// Threshold for movement detection (adjust as needed) 
+float movementThreshold = 14; // Example threshold in g-force units 
+// Define the GPIO pin connected to the base of the BC547 transistor 
+const int transistorPin = D5; // Example pin, change as needed 
+void setup() { 
+Serial.begin(9600); // Initialize Serial Monitor 
+mySerial.begin(57600); // Initialize 
+SoftwareSerial for Fingerprint 
+gpsSerial.begin(9600); // Initialize 
+SoftwareSerial for GPS
+
+Wire.begin(D3, D4); // Initialize I2C communication 
+with ADXL345 
+ 
+  // Initialize fingerprint sensor 
+  if (finger.verifyPassword()) { 
+    Serial.println("Fingerprint sensor detected!"); 
+  } else { 
+    Serial.println("Fingerprint sensor not found"); 
+    while (1) { delay(1); } 
+  } 
+ 
+  // Initialize ADXL345 accelerometer 
+  if(!accel.begin()) { 
+    Serial.println("Could not find a valid ADXL345 
+sensor, check wiring!"); 
+    while(1); 
+  } 
+ 
+  // Set accelerometer range (optional) 
+  accel.setRange(ADXL345_RANGE_16_G); 
+ 
+  // Initialize the transistor pin as an output 
+  pinMode(transistorPin, OUTPUT); 
+  digitalWrite(transistorPin, LOW); // Ensure the 
+transistor is off at start 
+ 
+  // Connect to Wi-Fi 
+  connectToWiFi(); 
+} 
+ 
+void loop() { 
+  // Check for fingerprints 
+  uint8_t p = finger.getImage(); 
+  if (p == FINGERPRINT_OK) { 
+    p = finger.image2Tz(); 
+    if (p == FINGERPRINT_OK) { 
+      p = finger.fingerSearch(); 
+      if (p == FINGERPRINT_OK) { 
+        // Authorized access 
+
+Serial.println("Access granted"); 
+digitalWrite(transistorPin, HIGH); // Turn on the 
+transistor 
+        delay(1000); // Wait for the user to remove 
+the finger 
+      } else { 
+        // Unauthorized access 
+        Serial.println("Unauthorized access 
+detected!"); 
+        digitalWrite(transistorPin, LOW); // Turn 
+off the transistor 
+        sendTwilioSMS("Unauthorized access 
+detected!"); 
+      } 
+    } 
+  } else { 
+    digitalWrite(transistorPin, LOW); // Turn off 
+the transistor when no valid fingerprint image is 
+detected 
+  } 
+ 
+  // Check for movement 
+  sensors_event_t event;  
+  accel.getEvent(&event); 
+  float accelerationMagnitude = 
+sqrt(event.acceleration.x * event.acceleration.x + 
+                                     
+event.acceleration.y * event.acceleration.y + 
+                                     
+event.acceleration.z * event.acceleration.z); 
+ 
+  // Adjust the threshold here based on your 
+requirement 
+  if (accelerationMagnitude >= movementThreshold) { 
+    Serial.println("High movement detected!"); 
+    sendTwilioSMS("High movement detected!"); 
+  } 
+ 
+// Update GPS data 
+updateGPSData();
+  // Attempt to reconnect to Wi-Fi if disconnected 
+  if (WiFi.status() != WL_CONNECTED) { 
+    connectToWiFi(); 
+  } 
+ 
+  delay(1000); 
+} 
+ 
+void connectToWiFi() { 
+  WiFi.begin(ssid, password); 
+  Serial.print("Connecting to Wi-Fi"); 
+  while (WiFi.status() != WL_CONNECTED) { 
+    delay(500); 
+    Serial.print("."); 
+  } 
+  Serial.println("\nConnected to Wi-Fi"); 
+} 
+ 
+void sendTwilioSMS(String message) { 
+  if (WiFi.status() == WL_CONNECTED) { 
+    WiFiClientSecure client; 
+    client.setInsecure(); // Disable SSL verification for simplicity 
+    HTTPClient http; 
+     
+    String url = "https://api.twilio.com/2010-04-01/Accounts/" + 
+String(account_sid) + "/Messages.json"; 
+    String body = "From=" + String(from_number) + "&To=" + 
+String(to_number) + "&Body=" + message; 
+ 
+    // Fetch GPS location 
+    String gpsData = getGPSData(); 
+    body += " GPS Location: " + gpsData; 
+ 
+    String auth = base64::encode(String(account_sid) + ":" + 
+String(auth_token)); 
+ 
+    http.begin(client, url); 
+    http.addHeader("Authorization", "Basic " + auth);
+http.addHeader("Content-Type", "application/x-www-form-urlencoded"); 
+int httpResponseCode = http.POST(body); 
+if (httpResponseCode > 0) { 
+String response = http.getString(); 
+Serial.println("HTTP Response code: " + 
+String(httpResponseCode)); 
+Serial.println("Response: " + response); 
+} else { 
+Serial.print("Error code: "); 
+Serial.println(httpResponseCode); 
+} 
+http.end(); 
+} else { 
+Serial.println("Wi-Fi Disconnected, cannot send SMS"); 
+} 
+} 
+String getGPSData() { 
+if (gps.location.isValid()) { 
+lastLatitude = gps.location.lat(); 
+lastLongitude = gps.location.lng(); 
+} 
+String gpsLink = 
+"https://www.google.com/maps/search/?api=1&query=" + 
+String(lastLatitude, 6) + "," + String(lastLongitude, 6); 
+return gpsLink; 
+} 
+void updateGPSData() { 
+while (gpsSerial.available() > 0) { 
+gps.encode(gpsSerial.read()); 
+} 
+}
